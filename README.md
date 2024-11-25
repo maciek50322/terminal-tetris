@@ -6,4 +6,4 @@
 
 ![Example image](example.png)
 
-Learning rust project written with [tamagui](https://tamagui.dev/).
+Learning rust project written with [ratatui](https://ratatui.rs/).
