@@ -4,8 +4,8 @@ Learning rust project written with [ratatui](https://ratatui.rs/).
 
 ![Example image](example.png)
 
-- Needs to be executed in terminal
-- Game size is fit to initial terminal size
+- Requires only terminal
+- Game size is fit to initial terminal size. To set game size: set terminal size before starting the game.
 - Gravity to right
 - Shows block shadow at the end
 - Controls
@@ -20,13 +20,11 @@ Learning rust project written with [ratatui](https://ratatui.rs/).
 
 ## Starting the game
 
-To download dependencies, build and run, use: 
-```sh
-cargo run
-```
-or
+For ready executables check out [Releases](https://github.com/maciek50322/terminal-tetris/releases).
+
+Otherwise download rust and this project. Then
+to download dependencies, build and run, use: 
 ```sh
 cargo run --release
 ```
-
-The game will begin in terminal. Without terminal the game will not start.
+inside the project folder.
