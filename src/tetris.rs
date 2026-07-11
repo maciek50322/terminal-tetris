@@ -30,10 +30,12 @@ pub enum GameState {
 #[derive(Debug)]
 pub struct Tetris {
     cursor_state: bool,
+    locked: bool,
     game_state: GameState,
     rounds: u64,
     points: u64,
     exit: bool,
+    reset: bool,
     screen_rect: Rect,
     board_rect: Rect,
     info_rect: Vec<Rect>,
@@ -107,10 +109,12 @@ impl Tetris {
 
         Self {
             cursor_state: false,
+            locked: false,
             game_state: GameState::Playing,
             rounds: 0,
             points: 0,
             exit: false,
+            reset: false,
             screen_rect,
             next_rect,
             info_rect,
@@ -127,63 +131,87 @@ impl Tetris {
         }
     }
 
+    fn reset(&mut self) {
+        if self.game_state != GameState::Finished {
+            return;
+        }
+
+        self.filled_area = vec![vec![Color::Black; self.game_height]; self.game_width];
+
+        self.current_block = TetrisBlock::new_random();
+        self.next_block = TetrisBlock::new_random();
+        self.current_block.pos = (
+            0,
+            self.game_height as i32 / 2 - self.current_block.pattern[0].len() as i32 / 2,
+        );
+        self.next_block.pos = (
+            self.next_width / 2 - self.next_block.pattern.len() as i32 / 2,
+            self.next_height / 2 - self.next_block.pattern[0].len() as i32 / 2,
+        );
+
+        self.rounds = 0;
+        self.points = 0;
+        self.game_state = GameState::Playing;
+        self.reset = true;
+    }
+
     pub fn run(self) -> io::Result<()> {
         let atomic_terminal = Arc::clone(&self.terminal);
-        let second_atomic_terminal = Arc::clone(&self.terminal);
         let atomic_self = Arc::new(Mutex::new(self));
-        let second_atomic_self = Arc::clone(&atomic_self);
-
-        let join_handle = thread::spawn(move || loop {
-            let (parts, part_interval) = {
-                let atomic_self = second_atomic_self.lock().unwrap();
-                let parts = (atomic_self.move_interval.as_secs_f64() / 0.1).ceil() as u32;
-                (parts, atomic_self.move_interval / parts)
-            };
-
-            for _ in 0..parts {
-                thread::sleep(part_interval);
-                let atomic_self = second_atomic_self.lock().unwrap();
-                if atomic_self.exit {
-                    return;
-                };
-            }
-
-            {
-                let mut atomic_self = second_atomic_self.lock().unwrap();
-                if atomic_self.exit {
-                    return;
-                };
-
-                if atomic_self.game_state == GameState::Finished {
-                    return;
-                }
-                if atomic_self.game_state == GameState::Playing {
-                    atomic_self.move_forward();
-                    let _ = second_atomic_terminal
-                        .lock()
-                        .unwrap()
-                        .draw(|frame| atomic_self.draw(frame));
-                }
-            }
-        });
 
         while !{ atomic_self.lock().unwrap().exit } {
             {
-                let mut atomic_self = atomic_self.lock().unwrap();
-                atomic_terminal
-                    .lock()
-                    .unwrap()
-                    .draw(|frame| atomic_self.draw(frame))?;
+                atomic_self.lock().unwrap().reset = false;
             }
-            match event::read()? {
-                Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
-                    atomic_self.lock().unwrap().handle_key_event(key_event)?
-                }
-                _ => {}
-            };
-        }
 
-        join_handle.join().unwrap();
+            let join_handle = thread::spawn({
+                let atomic_terminal = atomic_terminal.clone();
+                let atomic_self = atomic_self.clone();
+
+                move || loop {
+                    let (parts, part_interval) = {
+                        let atomic_self = atomic_self.lock().unwrap();
+                        let parts = (atomic_self.move_interval.as_secs_f64() / 0.1).ceil() as u32;
+                        (parts, atomic_self.move_interval / parts)
+                    };
+
+                    for _ in 0..parts {
+                        thread::sleep(part_interval);
+                        let atomic_self = atomic_self.lock().unwrap();
+                        if atomic_self.exit || atomic_self.reset {
+                            return;
+                        };
+                    }
+
+                    let mut atomic_self = atomic_self.lock().unwrap();
+                    if atomic_self.game_state == GameState::Playing {
+                        atomic_self.move_forward();
+                        let _ = atomic_terminal
+                            .lock()
+                            .unwrap()
+                            .draw(|frame| atomic_self.draw(frame));
+                    }
+                }
+            });
+
+            while !{ atomic_self.lock().unwrap().exit || atomic_self.lock().unwrap().reset } {
+                {
+                    let mut atomic_self = atomic_self.lock().unwrap();
+                    atomic_terminal
+                        .lock()
+                        .unwrap()
+                        .draw(|frame| atomic_self.draw(frame))?;
+                }
+                match event::read()? {
+                    Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
+                        atomic_self.lock().unwrap().handle_key_event(key_event)?
+                    }
+                    _ => {}
+                };
+            }
+
+            join_handle.join().unwrap();
+        }
 
         Ok(())
     }
@@ -197,13 +225,21 @@ impl Tetris {
             KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.exit();
             }
-            KeyCode::Left | KeyCode::Char('a') => self.rotate90(),
-            KeyCode::Right | KeyCode::Char('d') => self.move_forward(),
-            KeyCode::Up | KeyCode::Char('w') => self.move_side(MoveDirection::Up),
-            KeyCode::Down | KeyCode::Char('s') => self.move_side(MoveDirection::Down),
-            KeyCode::Char(' ') => self.move_till_end(),
-            KeyCode::Char('p') => self.pause(),
-            _ => {}
+            _ => {
+                if self.locked {
+                    return Ok(());
+                }
+                match key_event.code {
+                    KeyCode::Left | KeyCode::Char('a') => self.rotate90(),
+                    KeyCode::Right | KeyCode::Char('d') => self.move_forward(),
+                    KeyCode::Up | KeyCode::Char('w') => self.move_side(MoveDirection::Up),
+                    KeyCode::Down | KeyCode::Char('s') => self.move_side(MoveDirection::Down),
+                    KeyCode::Char(' ') => self.move_till_end(),
+                    KeyCode::Char('p') => self.pause(),
+                    KeyCode::Char('r') => self.reset(),
+                    _ => {}
+                }
+            }
         }
         Ok(())
     }
@@ -419,6 +455,7 @@ impl Widget for &mut Tetris {
             .is_some();
 
         if last_point_exists {
+            self.locked = false;
             let next = Canvas::default()
                 .block(
                     Block::bordered()
@@ -437,6 +474,18 @@ impl Widget for &mut Tetris {
                 });
 
             next.render(self.next_rect, buf);
+
+            let shortcut_info = if self.game_state == GameState::Finished {
+                " <Ctrl + C>".bold().blue()
+                    + " Exit ".not_bold().white()
+                    + "<R>".bold().blue()
+                    + " Reset ".not_bold().white()
+            } else {
+                " <Ctrl + C>".bold().blue()
+                    + " Exit ".not_bold().white()
+                    + "<P>".bold().blue()
+                    + " Pause ".not_bold().white()
+            };
 
             let info = Paragraph::new(Text::from(vec![
                 text::Line::from(vec![
@@ -459,12 +508,7 @@ impl Widget for &mut Tetris {
             .block(
                 Block::bordered()
                     .title_top(" Info ".bold().green())
-                    .title_bottom(
-                        " <Ctrl + C>".bold().blue()
-                            + " Exit ".not_bold().white()
-                            + "<P>".bold().blue()
-                            + " Pause ".not_bold().white(),
-                    )
+                    .title_bottom(shortcut_info)
                     .title_alignment(Alignment::Center),
             );
 
@@ -525,6 +569,7 @@ impl Widget for &mut Tetris {
                     Color::Reset
                 });
         } else {
+            self.locked = true;
             if self.game_state == GameState::Playing {
                 self.game_state = GameState::Paused;
             }
